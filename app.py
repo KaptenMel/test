@@ -1,139 +1,110 @@
-"""Simple command-line habit tracking app.
-
-This module provides a CLI for creating and completing daily habits.
-Data is persisted to a JSON file in the project directory.
+#!/usr/bin/env python3
 """
-from __future__ import annotations
+Habit Tracker CLI
 
-import argparse
+This script provides a modern command-line interface for tracking daily habits. It uses Typer
+and Rich to offer subcommands, colored output, and a neat table display.
+
+Usage:
+  python app.py --help
+"""
+
 import json
-from dataclasses import dataclass, asdict
+import os
 from datetime import date
-from pathlib import Path
-from typing import Dict, List
+import typer
+from rich.table import Table
+from rich.console import Console
 
-DATA_FILE = Path("data") / "habits.json"
+# Path to the JSON file where habits are stored
+DATA_FILE = "data/habits.json"
+
+app = typer.Typer(help="Track your daily habits with a beautiful CLI.")
+console = Console()
 
 
-@dataclass
-class Habit:
-    """Represent a tracked habit."""
+def load_data() -> dict:
+    """Load habit data from the JSON file. Returns an empty dict if the file doesn't exist."""
+    try:
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
 
-    name: str
-    streak: int = 0
-    last_completed: str | None = None
 
-    def mark_complete(self, today: date) -> None:
-        """Update the habit's streak when completed for ``today``.
+def save_data(data: dict) -> None:
+    """Save habit data back to the JSON file."""
+    os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
 
-        If the habit was completed yesterday, the streak increments.
-        Otherwise the streak resets to 1 for today.
-        """
 
-        today_str = today.isoformat()
-        if self.last_completed == (today - date.resolution).isoformat():
-            self.streak += 1
+@app.command()
+def add(name: str = typer.Argument(..., help="Name of the new habit")) -> None:
+    """Add a new habit to the tracker."""
+    data = load_data()
+    if name in data:
+        console.print(f"[yellow]Habit '{name}' already exists.[/]")
+        raise typer.Exit()
+    data[name] = {"streak": 0, "last_completed": None}
+    save_data(data)
+    console.print(f"[green]Added habit '{name}'.[/]")
+
+
+@app.command(name="list")
+def list_habits() -> None:
+    """List all habits with their current streak and last completion date."""
+    data = load_data()
+    if not data:
+        console.print("[cyan]No habits found. Add one with `python app.py add`.")
+        return
+    table = Table(title="Your Habits", box=None, show_header=True, header_style="bold magenta")
+    table.add_column("Habit", style="cyan", no_wrap=True)
+    table.add_column("Streak", justify="right", style="green")
+    table.add_column("Last Completed", style="yellow")
+    for name, info in data.items():
+        last = info["last_completed"] or "-"
+        table.add_row(name, str(info["streak"]), last)
+    console.print(table)
+
+
+@app.command()
+def complete(name: str = typer.Argument(..., help="Name of the habit to mark as completed")) -> None:
+    """Mark a habit as completed for today and update its streak."""
+    data = load_data()
+    if name not in data:
+        console.print(f"[red]Habit '{name}' not found.[/]")
+        raise typer.Exit(code=1)
+    today = date.today().isoformat()
+    info = data[name]
+    if info["last_completed"] == today:
+        console.print(f"[yellow]Habit '{name}' is already marked as completed today.[/]")
+        return
+    # Update streak depending on whether yesterday was the last completion date
+    if info["last_completed"]:
+        last_date = date.fromisoformat(info["last_completed"])
+        if (date.today() - last_date).days == 1:
+            info["streak"] += 1
         else:
-            self.streak = 1
-        self.last_completed = today_str
+            info["streak"] = 1
+    else:
+        info["streak"] = 1
+    info["last_completed"] = today
+    save_data(data)
+    console.print(f"[bold green]Completed '{name}'! New streak: {info['streak']}[/]")
 
 
-class HabitStore:
-    """Manage loading and saving habits from disk."""
-
-    def __init__(self, storage_path: Path) -> None:
-        self.storage_path = storage_path
-        self.storage_path.parent.mkdir(parents=True, exist_ok=True)
-
-    def load(self) -> Dict[str, Habit]:
-        if not self.storage_path.exists():
-            return {}
-        with self.storage_path.open("r", encoding="utf-8") as fh:
-            data = json.load(fh)
-        return {name: Habit(**info) for name, info in data.items()}
-
-    def save(self, habits: Dict[str, Habit]) -> None:
-        with self.storage_path.open("w", encoding="utf-8") as fh:
-            json.dump({name: asdict(habit) for name, habit in habits.items()}, fh, indent=2)
-
-
-class HabitApp:
-    """CLI interface for managing habits."""
-
-    def __init__(self, store: HabitStore) -> None:
-        self.store = store
-
-    def add_habit(self, name: str) -> str:
-        habits = self.store.load()
-        if name in habits:
-            return f"Habit '{name}' already exists."
-        habits[name] = Habit(name=name)
-        self.store.save(habits)
-        return f"Added habit '{name}'."
-
-    def list_habits(self) -> List[str]:
-        habits = self.store.load()
-        if not habits:
-            return ["No habits tracked yet. Use 'add' to create one."]
-        lines = ["Your habits:"]
-        for habit in habits.values():
-            last_completed = habit.last_completed or "Never"
-            lines.append(f"- {habit.name} (streak: {habit.streak}, last completed: {last_completed})")
-        return lines
-
-    def complete_habit(self, name: str) -> str:
-        habits = self.store.load()
-        if name not in habits:
-            return f"Habit '{name}' is not being tracked."
-        habit = habits[name]
-        habit.mark_complete(date.today())
-        habits[name] = habit
-        self.store.save(habits)
-        return f"Nice! '{name}' streak is now {habit.streak}."
-
-    def delete_habit(self, name: str) -> str:
-        habits = self.store.load()
-        if habits.pop(name, None) is None:
-            return f"Habit '{name}' was not found."
-        self.store.save(habits)
-        return f"Removed habit '{name}'."
-
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Track daily habits and maintain streaks.")
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    add_parser = subparsers.add_parser("add", help="Add a new habit")
-    add_parser.add_argument("name", help="Name of the habit to track")
-
-    complete_parser = subparsers.add_parser("complete", help="Mark a habit as done today")
-    complete_parser.add_argument("name", help="Name of the habit to mark complete")
-
-    delete_parser = subparsers.add_parser("delete", help="Stop tracking a habit")
-    delete_parser.add_argument("name", help="Name of the habit to delete")
-
-    subparsers.add_parser("list", help="List all habits and streaks")
-    return parser
-
-
-def main(argv: List[str] | None = None) -> None:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    app = HabitApp(HabitStore(DATA_FILE))
-
-    if args.command == "add":
-        message = app.add_habit(args.name)
-        print(message)
-    elif args.command == "complete":
-        message = app.complete_habit(args.name)
-        print(message)
-    elif args.command == "delete":
-        message = app.delete_habit(args.name)
-        print(message)
-    elif args.command == "list":
-        for line in app.list_habits():
-            print(line)
+@app.command()
+def delete(name: str = typer.Argument(..., help="Name of the habit to delete")) -> None:
+    """Delete a habit from the tracker."""
+    data = load_data()
+    if name not in data:
+        console.print(f"[red]Habit '{name}' not found.[/]")
+        raise typer.Exit(code=1)
+    data.pop(name)
+    save_data(data)
+    console.print(f"[green]Deleted habit '{name}'.[/]")
 
 
 if __name__ == "__main__":
-    main()
+    app()
